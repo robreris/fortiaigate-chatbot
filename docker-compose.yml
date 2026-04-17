@@ -1,0 +1,31 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      FORTIAIGATE_BASE_URL: ${FORTIAIGATE_BASE_URL}
+      FORTIAIGATE_API_KEY: ${FORTIAIGATE_API_KEY}
+      FORTIAIGATE_MODEL: ${FORTIAIGATE_MODEL:-gpt-4o-mini}
+      FORTIAIGATE_SSL_VERIFY: ${FORTIAIGATE_SSL_VERIFY:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    environment:
+      NGINX_USERNAME: ${NGINX_USERNAME}
+      NGINX_PASSWORD: ${NGINX_PASSWORD}
+      BACKEND_HOST: backend
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

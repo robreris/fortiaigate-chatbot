@@ -1,0 +1,73 @@
+{
+  "family": "fortiaigate-chatbot",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::{{ACCOUNT_ID}}:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "frontend",
+      "image": "{{ACCOUNT_ID}}.dkr.ecr.{{REGION}}.amazonaws.com/fortiaigate-chatbot-frontend:{{TAG}}",
+      "portMappings": [
+        { "containerPort": 80, "protocol": "tcp" }
+      ],
+      "essential": true,
+      "dependsOn": [
+        { "containerName": "backend", "condition": "HEALTHY" }
+      ],
+      "environment": [
+        { "name": "NGINX_USERNAME", "value": "{{NGINX_USERNAME}}" },
+        { "name": "BACKEND_HOST",   "value": "127.0.0.1" }
+      ],
+      "secrets": [
+        {
+          "name": "NGINX_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:{{REGION}}:{{ACCOUNT_ID}}:secret:fortiaigate-chatbot/nginx-password"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/fortiaigate-chatbot",
+          "awslogs-region": "{{REGION}}",
+          "awslogs-stream-prefix": "frontend"
+        }
+      }
+    },
+    {
+      "name": "backend",
+      "image": "{{ACCOUNT_ID}}.dkr.ecr.{{REGION}}.amazonaws.com/fortiaigate-chatbot-backend:{{TAG}}",
+      "portMappings": [
+        { "containerPort": 8000, "protocol": "tcp" }
+      ],
+      "essential": true,
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      },
+      "environment": [
+        { "name": "FORTIAIGATE_BASE_URL", "value": "{{FORTIAIGATE_BASE_URL}}" },
+        { "name": "FORTIAIGATE_MODEL",    "value": "{{FORTIAIGATE_MODEL}}" },
+        { "name": "FORTIAIGATE_SSL_VERIFY", "value": "true" }
+      ],
+      "secrets": [
+        {
+          "name": "FORTIAIGATE_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:{{REGION}}:{{ACCOUNT_ID}}:secret:fortiaigate-chatbot/api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/fortiaigate-chatbot",
+          "awslogs-region": "{{REGION}}",
+          "awslogs-stream-prefix": "backend"
+        }
+      }
+    }
+  ]
+}
