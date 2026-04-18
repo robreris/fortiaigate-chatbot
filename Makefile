@@ -13,18 +13,26 @@ FRONTEND_IMAGE     = $(ECR_BASE)/$(FRONTEND_REPO)
 BACKEND_IMAGE      = $(ECR_BASE)/$(BACKEND_REPO)
 
 # FortiAIGate settings — must be set for task-register and deploy
-FORTIAIGATE_BASE_URL ?= fortiaigate.fortinetcloudcse.com
+FORTIAIGATE_BASE_URL ?= https://fortiaigate.fortinetcloudcse.com
 FORTIAIGATE_MODEL    ?= gpt-4o-mini
 NGINX_USERNAME       ?= demo
 
-# Subnets for service-create — auto-detects default VPC public subnets if not set
+# HTTPS / ALB settings — required for acm-setup, service-create, and teardown
+DOMAIN_NAME      ?=
+HOSTED_ZONE_ID   ?=
+CERT_ARN         ?= $(shell aws acm list-certificates \
+	--region $(AWS_REGION) \
+	--query "CertificateSummaryList[?DomainName=='$(DOMAIN_NAME)'].CertificateArn | [0]" \
+	--output text 2>/dev/null)
+
+# Subnets — auto-detects default VPC public subnets if not set
 SUBNET_IDS ?= $(shell aws ec2 describe-subnets \
 	--filters "Name=default-for-az,Values=true" \
 	--region $(AWS_REGION) \
 	--query "Subnets[*].SubnetId" \
 	--output text 2>/dev/null | tr '\t' ',')
 
-.PHONY: help iam-setup ecr-setup secrets-setup login build push task-register \
+.PHONY: help iam-setup ecr-setup secrets-setup acm-setup login build push task-register \
         cluster-create service-create deploy service-info \
         service-delete cluster-delete teardown
 
@@ -36,29 +44,33 @@ help:
 	@echo "  make ecr-setup          Create ECR repos and CloudWatch log group"
 	@echo "  make secrets-setup      Store API key and password in Secrets Manager"
 	@echo "                          Required env vars: FORTIAIGATE_API_KEY, NGINX_PASSWORD"
-	@echo "  make cluster-create     Create ECS cluster"
-	@echo "  make service-create     Create ECS service (public Fargate task)"
-	@echo "                          Override subnets: SUBNET_IDS=subnet-xxx,subnet-yyy"
+	@echo "  make cluster-create     Create ECS cluster (persistent — survives teardown)"
+	@echo "  make acm-setup          Request ACM certificate with Route 53 DNS validation"
+	@echo "                          Required: DOMAIN_NAME=chatbot.example.com HOSTED_ZONE_ID=Z..."
 	@echo ""
-	@echo "Deploy (after each image change):"
-	@echo "  make deploy             Build, push, re-register task def, and restart service"
+	@echo "Deploy (run after setup, or after teardown to reprovision):"
+	@echo "  make service-create     Create ALB, ECS service, and Route 53 record"
+	@echo "                          Required: DOMAIN_NAME=... HOSTED_ZONE_ID=..."
+	@echo "                                    FORTIAIGATE_BASE_URL=https://..."
+	@echo "  make deploy             Build, push, re-register task def, restart service"
 	@echo "                          Required: FORTIAIGATE_BASE_URL=https://..."
 	@echo ""
 	@echo "Operations:"
-	@echo "  make service-info       Show running task public IP"
-	@echo "  make service-delete     Stop and delete the ECS service"
-	@echo "  make cluster-delete     Delete the ECS cluster"
-	@echo "  make teardown           Full teardown: service + cluster + security group"
-	@echo "                          (ECR repos, secrets, and log group are kept)"
+	@echo "  make service-info       Show HTTPS URL and ALB target health"
+	@echo "  make teardown           Delete service, ALB, Route 53 record, SGs — keeps cluster"
+	@echo "                          Required: DOMAIN_NAME=... HOSTED_ZONE_ID=..."
+	@echo "  make service-delete     Delete ECS service only"
+	@echo "  make cluster-delete     Delete ECS cluster (full infrastructure destroy)"
 	@echo ""
 	@echo "Current config:"
 	@echo "  AWS_ACCOUNT_ID = $(AWS_ACCOUNT_ID)"
 	@echo "  AWS_REGION     = $(AWS_REGION)"
 	@echo "  CLUSTER_NAME   = $(CLUSTER_NAME)"
+	@echo "  DOMAIN_NAME    = $(DOMAIN_NAME)"
 	@echo "  TAG            = $(TAG)"
 	@echo ""
 
-# ── One-time setup ────────────────────────────────────────────────────────────
+# ── One-time setup ─────────────────────────────────────────────────────────────
 
 iam-setup:
 	@echo "Creating ecsTaskExecutionRole..."
@@ -109,36 +121,44 @@ cluster-create:
 	@echo "Creating ECS cluster $(CLUSTER_NAME)..."
 	aws ecs create-cluster \
 		--cluster-name $(CLUSTER_NAME) \
-		--region $(AWS_REGION)
+		--region $(AWS_REGION) > /dev/null
 	@echo "Done."
 
-service-create: task-register
-	@[ -n "$(SUBNET_IDS)" ] || (echo "ERROR: No subnets found. Set SUBNET_IDS=subnet-xxx,subnet-yyy" && exit 1)
-	@echo "Creating security group..."
-	$(eval SG_ID := $(shell aws ec2 create-security-group \
-		--group-name $(SERVICE_NAME)-sg \
-		--description "FortiAIGate chatbot" \
+acm-setup:
+	@[ -n "$(DOMAIN_NAME)" ]    || (echo "ERROR: DOMAIN_NAME is required, e.g. make acm-setup DOMAIN_NAME=chatbot.example.com HOSTED_ZONE_ID=Z..." && exit 1)
+	@[ -n "$(HOSTED_ZONE_ID)" ] || (echo "ERROR: HOSTED_ZONE_ID is required" && exit 1)
+	@existing=$$(aws acm list-certificates \
 		--region $(AWS_REGION) \
-		--query GroupId --output text))
-	aws ec2 authorize-security-group-ingress \
-		--group-id $(SG_ID) \
-		--protocol tcp --port 80 --cidr 0.0.0.0/0 \
-		--region $(AWS_REGION)
-	aws ec2 authorize-security-group-egress \
-		--group-id $(SG_ID) \
-		--protocol tcp --port 443 --cidr 0.0.0.0/0 \
-		--region $(AWS_REGION) 2>/dev/null || true
-	@echo "Creating ECS service..."
-	aws ecs create-service \
-		--cluster $(CLUSTER_NAME) \
-		--service-name $(SERVICE_NAME) \
-		--task-definition fortiaigate-chatbot \
-		--desired-count 1 \
-		--launch-type FARGATE \
-		--network-configuration "awsvpcConfiguration={subnets=[$(SUBNET_IDS)],securityGroups=[$(SG_ID)],assignPublicIp=ENABLED}" \
-		--region $(AWS_REGION)
-	@echo ""
-	@echo "Service created. Run 'make service-info' in ~60s to get the public IP."
+		--query "CertificateSummaryList[?DomainName=='$(DOMAIN_NAME)'].CertificateArn | [0]" \
+		--output text 2>/dev/null); \
+	if [ -n "$$existing" ] && [ "$$existing" != "None" ]; then \
+		echo "Certificate already exists for $(DOMAIN_NAME): $$existing"; \
+		exit 0; \
+	fi; \
+	echo "Requesting ACM certificate for $(DOMAIN_NAME)..."; \
+	CERT=$$(aws acm request-certificate \
+		--domain-name $(DOMAIN_NAME) \
+		--validation-method DNS \
+		--region $(AWS_REGION) \
+		--query CertificateArn --output text); \
+	echo "Certificate ARN: $$CERT"; \
+	echo "Waiting for validation records to be generated..."; \
+	sleep 10; \
+	NAME=$$(aws acm describe-certificate --certificate-arn $$CERT \
+		--region $(AWS_REGION) \
+		--query 'Certificate.DomainValidationOptions[0].ResourceRecord.Name' --output text); \
+	VALUE=$$(aws acm describe-certificate --certificate-arn $$CERT \
+		--region $(AWS_REGION) \
+		--query 'Certificate.DomainValidationOptions[0].ResourceRecord.Value' --output text); \
+	echo "Adding DNS validation CNAME to Route 53: $$NAME"; \
+	aws route53 change-resource-record-sets \
+		--hosted-zone-id $(HOSTED_ZONE_ID) \
+		--change-batch "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"$$NAME\",\"Type\":\"CNAME\",\"TTL\":300,\"ResourceRecords\":[{\"Value\":\"$$VALUE\"}]}}]}" \
+		> /dev/null; \
+	echo "Waiting for certificate to be issued (may take 1-5 minutes)..."; \
+	aws acm wait certificate-validated --certificate-arn $$CERT --region $(AWS_REGION); \
+	echo ""; \
+	echo "Certificate issued: $$CERT"
 
 # ── Build and push ─────────────────────────────────────────────────────────────
 
@@ -168,7 +188,7 @@ task-register:
 		infra/ecs-task-definition.json > /tmp/fortiaigate-chatbot-task-def.json
 	aws ecs register-task-definition \
 		--region $(AWS_REGION) \
-		--cli-input-json file:///tmp/fortiaigate-chatbot-task-def.json
+		--cli-input-json file:///tmp/fortiaigate-chatbot-task-def.json > /dev/null
 	@echo "Task definition registered."
 
 # ── Deploy ─────────────────────────────────────────────────────────────────────
@@ -180,33 +200,137 @@ deploy: push task-register
 		--service $(SERVICE_NAME) \
 		--task-definition fortiaigate-chatbot \
 		--force-new-deployment \
-		--region $(AWS_REGION)
+		--region $(AWS_REGION) > /dev/null
 	@echo ""
-	@echo "Deployment started. Run 'make service-info' in ~60s to get the public IP."
+	@echo "Deployment started. Run 'make service-info' in ~90s to check target health."
 
 # ── Operations ─────────────────────────────────────────────────────────────────
 
-service-info:
-	$(eval TASK_ARN := $(shell aws ecs list-tasks \
+service-create: task-register
+	@[ -n "$(SUBNET_IDS)" ]     || (echo "ERROR: No subnets found. Set SUBNET_IDS=subnet-xxx,subnet-yyy" && exit 1)
+	@[ -n "$(DOMAIN_NAME)" ]    || (echo "ERROR: DOMAIN_NAME is required, e.g. DOMAIN_NAME=chatbot.example.com" && exit 1)
+	@[ -n "$(HOSTED_ZONE_ID)" ] || (echo "ERROR: HOSTED_ZONE_ID is required" && exit 1)
+	@CERT="$(CERT_ARN)"; \
+	[ -n "$$CERT" ] && [ "$$CERT" != "None" ] || \
+		{ echo "ERROR: No ACM certificate found for $(DOMAIN_NAME). Run: make acm-setup DOMAIN_NAME=$(DOMAIN_NAME) HOSTED_ZONE_ID=$(HOSTED_ZONE_ID)"; exit 1; }; \
+	\
+	echo "Looking up VPC..."; \
+	VPC_ID=$$(aws ec2 describe-subnets \
+		--subnet-ids $$(echo "$(SUBNET_IDS)" | cut -d',' -f1) \
+		--region $(AWS_REGION) --query 'Subnets[0].VpcId' --output text); \
+	\
+	echo "Creating ALB security group..."; \
+	aws ec2 create-security-group --group-name $(SERVICE_NAME)-alb-sg \
+		--description "FortiAIGate chatbot ALB" --vpc-id $$VPC_ID \
+		--region $(AWS_REGION) > /dev/null 2>&1 || true; \
+	ALB_SG=$$(aws ec2 describe-security-groups \
+		--filters "Name=group-name,Values=$(SERVICE_NAME)-alb-sg" "Name=vpc-id,Values=$$VPC_ID" \
+		--region $(AWS_REGION) --query 'SecurityGroups[0].GroupId' --output text); \
+	aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
+		--protocol tcp --port 80 --cidr 0.0.0.0/0 --region $(AWS_REGION) 2>/dev/null || true; \
+	aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
+		--protocol tcp --port 443 --cidr 0.0.0.0/0 --region $(AWS_REGION) 2>/dev/null || true; \
+	\
+	echo "Creating task security group..."; \
+	aws ec2 create-security-group --group-name $(SERVICE_NAME)-sg \
+		--description "FortiAIGate chatbot tasks" --vpc-id $$VPC_ID \
+		--region $(AWS_REGION) > /dev/null 2>&1 || true; \
+	TASK_SG=$$(aws ec2 describe-security-groups \
+		--filters "Name=group-name,Values=$(SERVICE_NAME)-sg" "Name=vpc-id,Values=$$VPC_ID" \
+		--region $(AWS_REGION) --query 'SecurityGroups[0].GroupId' --output text); \
+	aws ec2 authorize-security-group-ingress --group-id $$TASK_SG \
+		--protocol tcp --port 80 --source-group $$ALB_SG \
+		--region $(AWS_REGION) 2>/dev/null || true; \
+	\
+	echo "Creating target group..."; \
+	TG_ARN=$$(aws elbv2 describe-target-groups --names $(SERVICE_NAME)-tg \
+		--region $(AWS_REGION) --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null); \
+	if [ -z "$$TG_ARN" ] || [ "$$TG_ARN" = "None" ]; then \
+		TG_ARN=$$(aws elbv2 create-target-group \
+			--name $(SERVICE_NAME)-tg \
+			--protocol HTTP --port 80 \
+			--vpc-id $$VPC_ID \
+			--target-type ip \
+			--health-check-path / \
+			--health-check-interval-seconds 30 \
+			--healthy-threshold-count 2 \
+			--matcher HttpCode=200-401 \
+			--region $(AWS_REGION) \
+			--query 'TargetGroups[0].TargetGroupArn' --output text); \
+	fi; \
+	\
+	echo "Creating ALB..."; \
+	ALB_ARN=$$(aws elbv2 describe-load-balancers --names $(SERVICE_NAME)-alb \
+		--region $(AWS_REGION) --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null); \
+	if [ -z "$$ALB_ARN" ] || [ "$$ALB_ARN" = "None" ]; then \
+		SUBNET_LIST=$$(echo "$(SUBNET_IDS)" | tr ',' ' '); \
+		ALB_ARN=$$(aws elbv2 create-load-balancer \
+			--name $(SERVICE_NAME)-alb \
+			--subnets $$SUBNET_LIST \
+			--security-groups $$ALB_SG \
+			--region $(AWS_REGION) \
+			--query 'LoadBalancers[0].LoadBalancerArn' --output text); \
+	fi; \
+	echo "Waiting for ALB to be active..."; \
+	aws elbv2 wait load-balancer-available --load-balancer-arns $$ALB_ARN --region $(AWS_REGION); \
+	ALB_DNS=$$(aws elbv2 describe-load-balancers --load-balancer-arns $$ALB_ARN \
+		--region $(AWS_REGION) --query 'LoadBalancers[0].DNSName' --output text); \
+	ALB_ZONE=$$(aws elbv2 describe-load-balancers --load-balancer-arns $$ALB_ARN \
+		--region $(AWS_REGION) --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text); \
+	\
+	echo "Creating ALB listeners..."; \
+	HTTPS_EXISTS=$$(aws elbv2 describe-listeners --load-balancer-arn $$ALB_ARN \
+		--region $(AWS_REGION) --query 'Listeners[?Port==`443`].ListenerArn' --output text 2>/dev/null); \
+	if [ -z "$$HTTPS_EXISTS" ] || [ "$$HTTPS_EXISTS" = "None" ]; then \
+		aws elbv2 create-listener \
+			--load-balancer-arn $$ALB_ARN --protocol HTTPS --port 443 \
+			--certificates CertificateArn=$$CERT \
+			--default-actions Type=forward,TargetGroupArn=$$TG_ARN \
+			--region $(AWS_REGION) > /dev/null; \
+		aws elbv2 create-listener \
+			--load-balancer-arn $$ALB_ARN --protocol HTTP --port 80 \
+			--default-actions 'Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}' \
+			--region $(AWS_REGION) > /dev/null; \
+	fi; \
+	\
+	echo "Creating ECS service..."; \
+	aws ecs create-service \
 		--cluster $(CLUSTER_NAME) \
 		--service-name $(SERVICE_NAME) \
-		--region $(AWS_REGION) \
-		--query "taskArns[0]" --output text))
-	@[ "$(TASK_ARN)" != "None" ] || (echo "No running tasks found." && exit 1)
-	$(eval ENI_ID := $(shell aws ecs describe-tasks \
-		--cluster $(CLUSTER_NAME) \
-		--tasks $(TASK_ARN) \
-		--region $(AWS_REGION) \
-		--query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value" \
-		--output text))
-	$(eval PUBLIC_IP := $(shell aws ec2 describe-network-interfaces \
-		--network-interface-ids $(ENI_ID) \
-		--region $(AWS_REGION) \
-		--query "NetworkInterfaces[0].Association.PublicIp" \
-		--output text))
+		--task-definition fortiaigate-chatbot \
+		--desired-count 1 \
+		--launch-type FARGATE \
+		--network-configuration "awsvpcConfiguration={subnets=[$(SUBNET_IDS)],securityGroups=[$$TASK_SG],assignPublicIp=ENABLED}" \
+		--load-balancers "targetGroupArn=$$TG_ARN,containerName=frontend,containerPort=80" \
+		--health-check-grace-period-seconds 60 \
+		--region $(AWS_REGION) > /dev/null; \
+	\
+	echo "Updating Route 53 record..."; \
+	aws route53 change-resource-record-sets \
+		--hosted-zone-id $(HOSTED_ZONE_ID) \
+		--change-batch "{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"$(DOMAIN_NAME)\",\"Type\":\"A\",\"AliasTarget\":{\"HostedZoneId\":\"$$ALB_ZONE\",\"DNSName\":\"$$ALB_DNS\",\"EvaluateTargetHealth\":true}}}]}" \
+		> /dev/null; \
+	echo ""; \
+	echo "Done. HTTPS endpoint: https://$(DOMAIN_NAME)"; \
+	echo "Run 'make service-info' in ~90s to check target health."
+
+service-info:
+	@[ -n "$(DOMAIN_NAME)" ] || (echo "ERROR: DOMAIN_NAME is required" && exit 1)
 	@echo ""
-	@echo "Chatbot is running at: http://$(PUBLIC_IP)"
+	@echo "Chatbot URL: https://$(DOMAIN_NAME)"
 	@echo ""
+	@TG_ARN=$$(aws elbv2 describe-target-groups --names $(SERVICE_NAME)-tg \
+		--region $(AWS_REGION) --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null); \
+	if [ -n "$$TG_ARN" ] && [ "$$TG_ARN" != "None" ]; then \
+		echo "Target health:"; \
+		aws elbv2 describe-target-health --target-group-arn $$TG_ARN \
+			--region $(AWS_REGION) \
+			--query 'TargetHealthDescriptions[*].{State:TargetHealth.State,Reason:TargetHealth.Reason}' \
+			--output table; \
+	else \
+		echo "(no target group found)"; \
+	fi; \
+	echo ""
 
 service-delete:
 	@echo "Scaling service to 0..."
@@ -214,27 +338,72 @@ service-delete:
 		--cluster $(CLUSTER_NAME) \
 		--service $(SERVICE_NAME) \
 		--desired-count 0 \
+		--region $(AWS_REGION) > /dev/null
+	@echo "Waiting for tasks to stop (this may take ~60s)..."
+	aws ecs wait services-stable \
+		--cluster $(CLUSTER_NAME) \
+		--services $(SERVICE_NAME) \
 		--region $(AWS_REGION)
 	@echo "Deleting service..."
 	aws ecs delete-service \
 		--cluster $(CLUSTER_NAME) \
 		--service $(SERVICE_NAME) \
-		--region $(AWS_REGION)
-	@echo "Done."
+		--region $(AWS_REGION) > /dev/null
+	@echo "Service deleted."
 
 cluster-delete:
 	aws ecs delete-cluster \
 		--cluster $(CLUSTER_NAME) \
-		--region $(AWS_REGION)
+		--region $(AWS_REGION) > /dev/null
 	@echo "Cluster deleted."
 
-teardown: service-delete cluster-delete
-	@echo "Deleting security group..."
-	$(eval SG_ID := $(shell aws ec2 describe-security-groups \
-		--filters "Name=group-name,Values=$(SERVICE_NAME)-sg" \
-		--region $(AWS_REGION) \
-		--query "SecurityGroups[0].GroupId" --output text))
-	@[ "$(SG_ID)" != "None" ] && \
-		aws ec2 delete-security-group --group-id $(SG_ID) --region $(AWS_REGION) || true
-	@echo "Teardown complete. ECR repos, Secrets Manager secrets, and log group retained."
-	@echo "Run 'make cluster-create service-create' to redeploy."
+teardown:
+	@[ -n "$(DOMAIN_NAME)" ]    || (echo "ERROR: DOMAIN_NAME is required" && exit 1)
+	@[ -n "$(HOSTED_ZONE_ID)" ] || (echo "ERROR: HOSTED_ZONE_ID is required" && exit 1)
+	@echo "Scaling ECS service to 0..."
+	@aws ecs update-service --cluster $(CLUSTER_NAME) --service $(SERVICE_NAME) \
+		--desired-count 0 --region $(AWS_REGION) > /dev/null 2>&1 || true
+	@echo "Waiting for tasks to stop..."
+	@aws ecs wait services-stable --cluster $(CLUSTER_NAME) --services $(SERVICE_NAME) \
+		--region $(AWS_REGION) 2>/dev/null || true
+	@echo "Deleting ECS service..."
+	@aws ecs delete-service --cluster $(CLUSTER_NAME) --service $(SERVICE_NAME) \
+		--region $(AWS_REGION) > /dev/null 2>&1 || true
+	@echo "Removing Route 53 record and deleting ALB..."
+	@ALB_ARN=$$(aws elbv2 describe-load-balancers --names $(SERVICE_NAME)-alb \
+		--region $(AWS_REGION) --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null); \
+	if [ -n "$$ALB_ARN" ] && [ "$$ALB_ARN" != "None" ]; then \
+		ALB_DNS=$$(aws elbv2 describe-load-balancers --load-balancer-arns $$ALB_ARN \
+			--region $(AWS_REGION) --query 'LoadBalancers[0].DNSName' --output text); \
+		ALB_ZONE=$$(aws elbv2 describe-load-balancers --load-balancer-arns $$ALB_ARN \
+			--region $(AWS_REGION) --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text); \
+		aws route53 change-resource-record-sets \
+			--hosted-zone-id $(HOSTED_ZONE_ID) \
+			--change-batch "{\"Changes\":[{\"Action\":\"DELETE\",\"ResourceRecordSet\":{\"Name\":\"$(DOMAIN_NAME)\",\"Type\":\"A\",\"AliasTarget\":{\"HostedZoneId\":\"$$ALB_ZONE\",\"DNSName\":\"$$ALB_DNS\",\"EvaluateTargetHealth\":true}}}]}" \
+			> /dev/null 2>&1 || true; \
+		aws elbv2 delete-load-balancer --load-balancer-arn $$ALB_ARN --region $(AWS_REGION); \
+		echo "Waiting for ALB to be deleted..."; \
+		aws elbv2 wait load-balancers-deleted --load-balancer-arns $$ALB_ARN --region $(AWS_REGION); \
+	fi
+	@echo "Deleting target group..."
+	@TG_ARN=$$(aws elbv2 describe-target-groups --names $(SERVICE_NAME)-tg \
+		--region $(AWS_REGION) --query 'TargetGroups[0].TargetGroupArn' --output text 2>/dev/null); \
+	[ -n "$$TG_ARN" ] && [ "$$TG_ARN" != "None" ] && \
+		aws elbv2 delete-target-group --target-group-arn $$TG_ARN --region $(AWS_REGION) 2>/dev/null || true
+	@echo "Deleting security groups..."
+	@VPC_ID=$$(aws ec2 describe-subnets \
+		--subnet-ids $$(echo "$(SUBNET_IDS)" | cut -d',' -f1) \
+		--region $(AWS_REGION) --query 'Subnets[0].VpcId' --output text 2>/dev/null); \
+	TASK_SG=$$(aws ec2 describe-security-groups \
+		--filters "Name=group-name,Values=$(SERVICE_NAME)-sg" "Name=vpc-id,Values=$$VPC_ID" \
+		--region $(AWS_REGION) --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null); \
+	ALB_SG=$$(aws ec2 describe-security-groups \
+		--filters "Name=group-name,Values=$(SERVICE_NAME)-alb-sg" "Name=vpc-id,Values=$$VPC_ID" \
+		--region $(AWS_REGION) --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null); \
+	[ -n "$$TASK_SG" ] && [ "$$TASK_SG" != "None" ] && \
+		aws ec2 delete-security-group --group-id $$TASK_SG --region $(AWS_REGION) 2>/dev/null || true; \
+	[ -n "$$ALB_SG" ] && [ "$$ALB_SG" != "None" ] && \
+		aws ec2 delete-security-group --group-id $$ALB_SG --region $(AWS_REGION) 2>/dev/null || true
+	@echo ""
+	@echo "Teardown complete. Cluster '$(CLUSTER_NAME)' and ACM cert retained."
+	@echo "Run 'make service-create DOMAIN_NAME=$(DOMAIN_NAME) HOSTED_ZONE_ID=$(HOSTED_ZONE_ID) FORTIAIGATE_BASE_URL=...' to redeploy."
