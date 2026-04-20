@@ -11,7 +11,7 @@ async def send_chat(request: ChatRequest) -> ChatResponse:
 
     async with httpx.AsyncClient(verify=settings.ssl_verify, timeout=120.0) as client:
         response = await client.post(
-            f"{settings.base_url.rstrip('/')}/v1/test",
+            f"{settings.base_url.rstrip('/')}/{request.flow_path.lstrip('/')}",
             headers={
                 "Authorization": f"Bearer {settings.api_key}",
                 "Content-Type": "application/json",

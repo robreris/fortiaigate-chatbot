@@ -7,7 +7,7 @@ export function useChat() {
   const [status, setStatus] = useState<ChatStatus>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  async function sendMessage(content: string, model: string) {
+  async function sendMessage(content: string, flowPath: string) {
     const userMessage: Message = { role: "user", content };
     const nextMessages = [...messages, userMessage];
 
@@ -20,7 +20,7 @@ export function useChat() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages, model }),
+        body: JSON.stringify({ messages: nextMessages, flow_path: flowPath }),
       });
 
       if (!res.ok) {

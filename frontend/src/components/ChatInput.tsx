@@ -3,19 +3,17 @@ import type { Message } from "../types/chat";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-const MODELS = ["gpt-4o-mini", "gpt-4o"];
-
 interface Props {
   messages: Message[];
   status: "idle" | "loading" | "error";
   error: string | null;
-  onSend: (content: string, model: string) => void;
+  onSend: (content: string, flowPath: string) => void;
   onClear: () => void;
 }
 
 export function ChatInput({ messages, status, error, onSend, onClear }: Props) {
   const [input, setInput] = useState("");
-  const [model, setModel] = useState(MODELS[0]);
+  const [flowPath, setFlowPath] = useState("/v1/test");
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -26,7 +24,7 @@ export function ChatInput({ messages, status, error, onSend, onClear }: Props) {
   function handleSend() {
     const trimmed = input.trim();
     if (!trimmed || status === "loading") return;
-    onSend(trimmed, model);
+    onSend(trimmed, flowPath);
     setInput("");
     textareaRef.current?.focus();
   }
@@ -86,17 +84,16 @@ export function ChatInput({ messages, status, error, onSend, onClear }: Props) {
         />
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <label className="text-gray-500 text-xs">Model</label>
-            <select
-              className="bg-fortinet-gray text-gray-300 text-xs rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-fortinet-red"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
+            <label className="text-gray-500 text-xs">Flow</label>
+            <input
+              type="text"
+              className="bg-fortinet-gray text-gray-300 text-xs rounded px-2 py-1 w-36 focus:outline-none focus:ring-1 focus:ring-fortinet-red placeholder-gray-600"
+              value={flowPath}
+              onChange={(e) => setFlowPath(e.target.value)}
               disabled={status === "loading"}
-            >
-              {MODELS.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
+              placeholder="/v1/test"
+              spellCheck={false}
+            />
           </div>
           <div className="flex gap-2">
             <button

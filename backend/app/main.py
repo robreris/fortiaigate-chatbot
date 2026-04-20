@@ -25,6 +25,11 @@ async def chat(request: ChatRequest):
     try:
         return await send_chat(request)
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        try:
+            body = e.response.json()
+            detail = body.get("detail") or body.get("message") or body.get("error") or e.response.text
+        except Exception:
+            detail = e.response.text or str(e)
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"FortiAIGate unreachable: {e}")

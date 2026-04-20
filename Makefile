@@ -1,4 +1,5 @@
 export AWS_PAGER  =
+include .env
 
 AWS_REGION        ?= us-east-1
 AWS_ACCOUNT_ID    ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
@@ -369,6 +370,13 @@ teardown:
 	@echo "Deleting ECS service..."
 	@aws ecs delete-service --cluster $(CLUSTER_NAME) --service $(SERVICE_NAME) \
 		--region $(AWS_REGION) > /dev/null 2>&1 || true
+	@echo "Waiting for all tasks to stop (service draining)..."
+	@while [ -n "$$(aws ecs list-tasks --cluster $(CLUSTER_NAME) --family fortiaigate-chatbot \
+		--region $(AWS_REGION) --query 'taskArns' --output text 2>/dev/null)" ]; do \
+		echo "  Tasks still running, retrying in 10s..."; \
+		sleep 10; \
+	done
+	@echo "All tasks stopped."
 	@echo "Removing Route 53 record and deleting ALB..."
 	@ALB_ARN=$$(aws elbv2 describe-load-balancers --names $(SERVICE_NAME)-alb \
 		--region $(AWS_REGION) --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null); \

@@ -9,6 +9,7 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[Message]
     model: str | None = None
+    flow_path: str = "/v1/test"
 
 
 class ScanMetadata(BaseModel):
