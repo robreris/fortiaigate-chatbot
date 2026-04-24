@@ -14,17 +14,36 @@ TLS is terminated at the Application Load Balancer using an ACM certificate. HTT
 
 **Prerequisites:** Docker Desktop or Docker + Docker Compose v2
 
+### 1. Configure environment
+
 ```bash
 cp .env.example .env
-# Edit .env — set FORTIAIGATE_BASE_URL, FORTIAIGATE_API_KEY, NGINX_USERNAME, NGINX_PASSWORD
+```
+
+Edit `.env` and set the required variables:
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `FORTIAIGATE_BASE_URL` | yes | — | Base URL of your FortiAIGate instance |
+| `FORTIAIGATE_API_KEY` | yes | — | Bearer token for the FortiAIGate API |
+| `NGINX_USERNAME` | yes | — | Username for the web UI basic auth |
+| `NGINX_PASSWORD` | yes | — | Password for the web UI basic auth |
+| `FORTIAIGATE_MODEL` | no | `gpt-4o-mini` | Model routed through the AI Flow |
+| `FORTIAIGATE_SSL_VERIFY` | no | `true` | Set to `false` when using self-signed certs |
+
+### 2. Build and start
+
+```bash
 docker compose up --build
 ```
 
-Open `http://localhost:3000` and log in with the credentials from your `.env`.
+The frontend waits for the backend health check to pass before starting. Once both containers are up, open `http://localhost:3000` and log in with the credentials from your `.env`.
 
-### Switching FortiAIGate endpoints (local)
+The backend API is also accessible directly at `http://localhost:8000`.
 
-| Scenario | FORTIAIGATE_BASE_URL | FORTIAIGATE_SSL_VERIFY |
+### FortiAIGate endpoint options
+
+| Scenario | `FORTIAIGATE_BASE_URL` | `FORTIAIGATE_SSL_VERIFY` |
 |---|---|---|
 | Production ALB | `https://<alb-hostname>` | `true` |
 | Local proxy (`make local-proxy`) | `https://host.docker.internal:9443` | `false` |

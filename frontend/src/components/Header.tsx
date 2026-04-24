@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+
 export function Header() {
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
 
@@ -15,28 +16,29 @@ export function Header() {
   }, []);
 
   return (
-    <header className="flex items-center justify-between px-6 py-3 bg-fortinet-dark border-b border-fortinet-gray">
+    <header className="flex items-center justify-between px-6 py-3.5 bg-fortinet-dark border-b border-fortinet-gray/50 shadow-sm">
       <div className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-fortinet-red rounded flex items-center justify-center text-white font-bold text-sm">
-          F
-        </div>
-        <div>
-          <span className="text-white font-semibold text-sm">FortiAIGate</span>
-          <span className="text-gray-400 text-sm ml-2">Chatbot Demo</span>
+        <img src="/Fortinet-logomark-rgb-red.png" alt="Fortinet" className="h-12 w-12 rounded-xl" />
+        <div className="flex items-center gap-2.5">
+          <img src="/FortiAIGate-white.png" alt="FortiAIGate" className="h-7" />
+          <span className="text-gray-400 text-base font-semibold">
+  <a href="https://www.fortinet.com/products/fortiaigate" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">FortiAIGate</a>
+  {" "}Chatbot Demo
+</span>
         </div>
       </div>
-      <div className="flex items-center gap-2 text-xs">
-        <span
-          className={`w-2 h-2 rounded-full ${
+      <div className="flex items-center gap-2">
+        <div
+          className={`w-2 h-2 rounded-full transition-colors ${
             backendOk === null
-              ? "bg-gray-500"
+              ? "bg-gray-600"
               : backendOk
               ? "bg-green-400"
-              : "bg-fortinet-red"
+              : "bg-fortinet-red animate-pulse"
           }`}
         />
-        <span className="text-gray-400">
-          {backendOk === null ? "Connecting…" : backendOk ? "Backend: OK" : "Backend: Unreachable"}
+        <span className="text-xs text-gray-500">
+          {backendOk === null ? "Connecting…" : backendOk ? "Backend connected" : "Backend unreachable"}
         </span>
       </div>
     </header>
