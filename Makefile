@@ -1,10 +1,14 @@
 export AWS_PAGER  =
 include .env
 
+## For cluster creation and testing, CLUSTER_NAME, SERVICE_NAME, TASK_FAMILY, and DOMAIN_NAME define a unique deployment.
+## Changing all four (e.g. adding a common suffix) is sufficient to run a second isolated stack alongside an existing one.
+
 AWS_REGION        ?= us-east-1
 AWS_ACCOUNT_ID    ?= $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
 CLUSTER_NAME      ?= fortiaigate-chatbot
 SERVICE_NAME      ?= fortiaigate-chatbot
+TASK_FAMILY       ?= fortiaigate-chatbot
 TAG               ?= latest
 
 FRONTEND_REPO      = fortiaigate-chatbot-frontend
@@ -200,13 +204,14 @@ task-register:
 		-e 's|{{ACCOUNT_ID}}|$(AWS_ACCOUNT_ID)|g' \
 		-e 's|{{REGION}}|$(AWS_REGION)|g' \
 		-e 's|{{TAG}}|$(TAG)|g' \
+		-e 's|{{TASK_FAMILY}}|$(TASK_FAMILY)|g' \
 		-e 's|{{FORTIAIGATE_BASE_URL}}|$(FORTIAIGATE_BASE_URL)|g' \
 		-e 's|{{FORTIAIGATE_MODEL}}|$(FORTIAIGATE_MODEL)|g' \
 		-e 's|{{NGINX_USERNAME}}|$(NGINX_USERNAME)|g' \
-		infra/ecs-task-definition.json > /tmp/fortiaigate-chatbot-task-def.json
+		infra/ecs-task-definition.json > /tmp/$(TASK_FAMILY)-task-def.json
 	aws ecs register-task-definition \
 		--region $(AWS_REGION) \
-		--cli-input-json file:///tmp/fortiaigate-chatbot-task-def.json > /dev/null
+		--cli-input-json file:///tmp/$(TASK_FAMILY)-task-def.json > /dev/null
 	@echo "Task definition registered."
 
 # ── Deploy ─────────────────────────────────────────────────────────────────────
@@ -216,7 +221,7 @@ deploy: push task-register
 	aws ecs update-service \
 		--cluster $(CLUSTER_NAME) \
 		--service $(SERVICE_NAME) \
-		--task-definition fortiaigate-chatbot \
+		--task-definition $(TASK_FAMILY) \
 		--force-new-deployment \
 		--region $(AWS_REGION) > /dev/null
 	@echo ""
@@ -323,7 +328,7 @@ service-create: task-register
 	aws ecs create-service \
 		--cluster $(CLUSTER_NAME) \
 		--service-name $(SERVICE_NAME) \
-		--task-definition fortiaigate-chatbot \
+		--task-definition $(TASK_FAMILY) \
 		--desired-count 1 \
 		--launch-type FARGATE \
 		--network-configuration "awsvpcConfiguration={subnets=[$(SUBNET_IDS)],securityGroups=[$$TASK_SG],assignPublicIp=$(ASSIGN_PUBLIC_IP)}" \
@@ -396,7 +401,7 @@ teardown:
 	@aws ecs delete-service --cluster $(CLUSTER_NAME) --service $(SERVICE_NAME) \
 		--region $(AWS_REGION) > /dev/null 2>&1 || true
 	@echo "Waiting for all tasks to stop (service draining)..."
-	@while [ -n "$$(aws ecs list-tasks --cluster $(CLUSTER_NAME) --family fortiaigate-chatbot \
+	@while [ -n "$$(aws ecs list-tasks --cluster $(CLUSTER_NAME) --family $(TASK_FAMILY) \
 		--region $(AWS_REGION) --query 'taskArns' --output text 2>/dev/null)" ]; do \
 		echo "  Tasks still running, retrying in 10s..."; \
 		sleep 10; \

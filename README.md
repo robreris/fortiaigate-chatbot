@@ -113,7 +113,7 @@ make deploy FORTIAIGATE_MODEL=gpt-4o
 
 ### Internal ALB with FortiGate
 
-When a FortiGate NGFW handles both inbound inspection and outbound egress, deploy with an internal ALB and tasks in private subnets:
+When a FortiGate NGFW handles both inbound inspection and outbound egress, deploy with an internal ALB and tasks in private subnets (you can set up a Route 53 private hosted zone for the internal deployment):
 
 ```bash
 make service-create \
@@ -128,6 +128,7 @@ make service-create \
 
 | Variable | Value | Notes |
 |---|---|---|
+| `HOSTED_ZONE_ID` | `Z...` | Set this to the Zone ID of a private hosted zone |
 | `ALB_SCHEME` | `internal` | Creates a private ALB not reachable from the internet |
 | `ALB_INGRESS_SG` | FortiGate security group ID | Restricts ALB inbound to traffic sourced from the FortiGate; preferred over CIDR |
 | `ALB_INGRESS_CIDR` | VPC/corporate CIDR | Fallback if `ALB_INGRESS_SG` is not set; defaults to `0.0.0.0/0` |

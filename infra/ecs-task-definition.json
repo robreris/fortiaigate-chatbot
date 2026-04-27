@@ -1,5 +1,5 @@
 {
-  "family": "fortiaigate-chatbot",
+  "family": "{{TASK_FAMILY}}",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
