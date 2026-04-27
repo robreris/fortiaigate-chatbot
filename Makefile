@@ -26,7 +26,19 @@ CERT_ARN         ?= $(shell aws acm list-certificates \
 	--query "CertificateSummaryList[?DomainName=='$(DOMAIN_NAME)'].CertificateArn | [0]" \
 	--output text 2>/dev/null)
 
-# Subnets — auto-detects default VPC public subnets if not set
+# ALB visibility — set ALB_SCHEME=internal for a private (non-internet-facing) ALB.
+# When using an internal ALB:
+#   - Set SUBNET_IDS to private subnet IDs (auto-detection only finds public/default subnets)
+#   - Set ALB_INGRESS_SG to the FortiGate security group ID (preferred, e.g. sg-xxxxxxxxx)
+#     OR set ALB_INGRESS_CIDR to a CIDR range if SG-based rules are not possible
+#   - Set ASSIGN_PUBLIC_IP=DISABLED if tasks run in private subnets with a FortiGate/NAT egress
+ALB_SCHEME       ?= internet-facing
+ALB_INGRESS_CIDR ?= 0.0.0.0/0
+ALB_INGRESS_SG   ?=
+ASSIGN_PUBLIC_IP ?= ENABLED
+
+# Subnets — auto-detects default VPC public subnets if not set.
+# For internal ALBs, override with private subnet IDs: SUBNET_IDS=subnet-xxx,subnet-yyy
 SUBNET_IDS ?= $(shell aws ec2 describe-subnets \
 	--filters "Name=default-for-az,Values=true" \
 	--region $(AWS_REGION) \
@@ -53,6 +65,11 @@ help:
 	@echo "  make service-create     Create ALB, ECS service, and Route 53 record"
 	@echo "                          Required: DOMAIN_NAME=... HOSTED_ZONE_ID=..."
 	@echo "                                    FORTIAIGATE_BASE_URL=https://..."
+	@echo "                          Internal ALB: add ALB_SCHEME=internal"
+	@echo "                                            ALB_INGRESS_SG=sg-xxx (FortiGate SG, preferred)"
+	@echo "                                            ALB_INGRESS_CIDR=10.0.0.0/8 (fallback if no SG)"
+	@echo "                                            ASSIGN_PUBLIC_IP=DISABLED"
+	@echo "                                            SUBNET_IDS=subnet-xxx,subnet-yyy (private)"
 	@echo "  make deploy             Build, push, re-register task def, restart service"
 	@echo "                          Required: FORTIAIGATE_BASE_URL=https://..."
 	@echo ""
@@ -227,10 +244,17 @@ service-create: task-register
 	ALB_SG=$$(aws ec2 describe-security-groups \
 		--filters "Name=group-name,Values=$(SERVICE_NAME)-alb-sg" "Name=vpc-id,Values=$$VPC_ID" \
 		--region $(AWS_REGION) --query 'SecurityGroups[0].GroupId' --output text); \
-	aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
-		--protocol tcp --port 80 --cidr 0.0.0.0/0 --region $(AWS_REGION) 2>/dev/null || true; \
-	aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
-		--protocol tcp --port 443 --cidr 0.0.0.0/0 --region $(AWS_REGION) 2>/dev/null || true; \
+	if [ -n "$(ALB_INGRESS_SG)" ]; then \
+		aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
+			--protocol tcp --port 80 --source-group $(ALB_INGRESS_SG) --region $(AWS_REGION) 2>/dev/null || true; \
+		aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
+			--protocol tcp --port 443 --source-group $(ALB_INGRESS_SG) --region $(AWS_REGION) 2>/dev/null || true; \
+	else \
+		aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
+			--protocol tcp --port 80 --cidr $(ALB_INGRESS_CIDR) --region $(AWS_REGION) 2>/dev/null || true; \
+		aws ec2 authorize-security-group-ingress --group-id $$ALB_SG \
+			--protocol tcp --port 443 --cidr $(ALB_INGRESS_CIDR) --region $(AWS_REGION) 2>/dev/null || true; \
+	fi; \
 	\
 	echo "Creating task security group..."; \
 	aws ec2 create-security-group --group-name $(SERVICE_NAME)-sg \
@@ -269,6 +293,7 @@ service-create: task-register
 			--name $(SERVICE_NAME)-alb \
 			--subnets $$SUBNET_LIST \
 			--security-groups $$ALB_SG \
+			--scheme $(ALB_SCHEME) \
 			--region $(AWS_REGION) \
 			--query 'LoadBalancers[0].LoadBalancerArn' --output text); \
 	fi; \
@@ -301,7 +326,7 @@ service-create: task-register
 		--task-definition fortiaigate-chatbot \
 		--desired-count 1 \
 		--launch-type FARGATE \
-		--network-configuration "awsvpcConfiguration={subnets=[$(SUBNET_IDS)],securityGroups=[$$TASK_SG],assignPublicIp=ENABLED}" \
+		--network-configuration "awsvpcConfiguration={subnets=[$(SUBNET_IDS)],securityGroups=[$$TASK_SG],assignPublicIp=$(ASSIGN_PUBLIC_IP)}" \
 		--load-balancers "targetGroupArn=$$TG_ARN,containerName=frontend,containerPort=80" \
 		--health-check-grace-period-seconds 60 \
 		--region $(AWS_REGION) > /dev/null; \

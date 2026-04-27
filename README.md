@@ -4,8 +4,14 @@ A web-based chatbot that routes user prompts through FortiAIGate's AI security g
 
 ## Architecture
 
+**Internet-facing (default):**
 ```
 Browser → ALB (HTTPS/443) → Nginx (frontend) → FastAPI (backend) → FortiAIGate (/v1/test) → LLM
+```
+
+**Internal with FortiGate inspection:**
+```
+Browser → FortiGate (WAN) → FortiGate (LAN) → ALB (internal, HTTPS/443) → Nginx (frontend) → FastAPI (backend) → FortiAIGate (/v1/test) → LLM
 ```
 
 TLS is terminated at the Application Load Balancer using an ACM certificate. HTTP (port 80) redirects to HTTPS automatically. The ALB forwards to the Nginx container on port 80; tasks are not directly reachable from the internet.
@@ -104,6 +110,36 @@ make deploy AWS_REGION=us-west-2
 make service-create SUBNET_IDS=subnet-abc,subnet-def DOMAIN_NAME=... HOSTED_ZONE_ID=...
 make deploy FORTIAIGATE_MODEL=gpt-4o
 ```
+
+### Internal ALB with FortiGate
+
+When a FortiGate NGFW handles both inbound inspection and outbound egress, deploy with an internal ALB and tasks in private subnets:
+
+```bash
+make service-create \
+  DOMAIN_NAME=chatbot.internal.example.com \
+  HOSTED_ZONE_ID=Z1234567890ABC \
+  FORTIAIGATE_BASE_URL=https://fortiaigate.example.com \
+  ALB_SCHEME=internal \
+  ALB_INGRESS_SG=sg-xxxxxxxxxxxxxxxxx \
+  ASSIGN_PUBLIC_IP=DISABLED \
+  SUBNET_IDS=subnet-aaa,subnet-bbb
+```
+
+| Variable | Value | Notes |
+|---|---|---|
+| `ALB_SCHEME` | `internal` | Creates a private ALB not reachable from the internet |
+| `ALB_INGRESS_SG` | FortiGate security group ID | Restricts ALB inbound to traffic sourced from the FortiGate; preferred over CIDR |
+| `ALB_INGRESS_CIDR` | VPC/corporate CIDR | Fallback if `ALB_INGRESS_SG` is not set; defaults to `0.0.0.0/0` |
+| `ASSIGN_PUBLIC_IP` | `DISABLED` | Tasks in private subnets do not need a public IP |
+| `SUBNET_IDS` | Private subnet IDs | Subnet auto-detection only finds default (public) subnets — must be set explicitly |
+
+**AWS networking prerequisites** (outside the Makefile):
+
+- Private subnet route tables must have `0.0.0.0/0 → FortiGate ENI`. This makes the FortiGate the egress path for all outbound traffic from the ECS tasks, including calls to ECR, Secrets Manager, and CloudWatch Logs — no NAT Gateway or VPC endpoints required.
+- FortiGate security policies must permit:
+  - **Inbound:** internet → WAN interface → LAN interface → ALB on port 443 (and 80 for the HTTP redirect)
+  - **Outbound:** ECS task subnets → FortiGate → internet on port 443 (for `*.amazonaws.com` service endpoints)
 
 ### What teardown removes vs. retains
 
