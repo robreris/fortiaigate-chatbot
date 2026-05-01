@@ -139,6 +139,15 @@ secrets-setup:
 		--region $(AWS_REGION)
 	@echo "Done."
 
+secret-rotate: secrets-setup
+	@echo "Force-redeploying service to pick up new secrets..."
+	aws ecs update-service \
+		--cluster $(CLUSTER_NAME) \
+		--service $(SERVICE_NAME) \
+		--force-new-deployment \
+		--region $(AWS_REGION) > /dev/null
+	@echo "Done."
+
 cluster-create:
 	@echo "Creating ECS cluster $(CLUSTER_NAME)..."
 	aws ecs create-cluster \
